@@ -305,6 +305,11 @@ def process_tsv_file(
                 with open(out_json, "w", encoding="utf-8") as f:
                     json.dump({"entities": entities}, f, ensure_ascii=False, indent=2)
 
+def should_include_file(fname):
+    """Return True if file is a dev or train tsv file, False otherwise."""
+    fname_lower = fname.lower()
+    return fname_lower.endswith('.tsv') and ('dev' in fname_lower or 'train' in fname_lower)
+
 def batch_process(datadir, base_out, max_tokens=384, hard_truncate=False, sliding_window=False, stride=256):
     formats = ['docs', 'log', 'srt']
     ensure_dirs(base_out, formats)
@@ -313,7 +318,7 @@ def batch_process(datadir, base_out, max_tokens=384, hard_truncate=False, slidin
     dropped_entities = []
     for root, dirs, files in os.walk(datadir):
         for fname in files:
-            if fname.endswith('.tsv'):
+            if should_include_file(fname):
                 tsv_path = os.path.join(root, fname)
                 print(f"Processing {tsv_path}")
                 try:
@@ -555,7 +560,7 @@ def validate_entities(datadir, base_out, max_tokens=384, sliding_window=False, s
 
     for root, dirs, files in os.walk(datadir):
         for fname in files:
-            if fname.endswith('.tsv'):
+            if should_include_file(fname):
                 total_files += 1
                 tsv_path = os.path.join(root, fname)
                 basename = os.path.splitext(os.path.basename(tsv_path))[0]
