@@ -424,19 +424,25 @@ def print_spinner(text, stop_event):
         time.sleep(0.1)
     print('\r' + ' ' * (len(text) + 2) + '\r', end='', flush=True)
 
-def merge_entities_from_windows(json_dir, basename, num_chunks):
+def merge_entities_from_windows(json_dir, basename, num_chunks, stride=256, max_tokens=384):
     merged = []
     seen = set()
     for chunk_idx in range(num_chunks):
         fpath = os.path.join(json_dir, f"{basename}_{chunk_idx}.json")
         if not os.path.exists(fpath):
             continue
+        # Calculate chunk start for sliding window!
+        chunk_start = chunk_idx * stride
         with open(fpath, encoding="utf-8") as f:
             data = json.load(f)
             for ent in data.get("entities", []):
-                key = (ent["label"], ent["text"], ent["start"], ent["end"])
+                # Add chunk_start to local offsets to get global offsets!
+                key = (ent["label"], ent["text"], ent["start"] + chunk_start, ent["end"] + chunk_start)
                 if key not in seen:
-                    merged.append(ent)
+                    ent2 = ent.copy()
+                    ent2["start"] += chunk_start
+                    ent2["end"] += chunk_start
+                    merged.append(ent2)
                     seen.add(key)
     return merged
 
@@ -491,6 +497,27 @@ def count_files_and_entities(base_out):
         stats[fmt_json]['entities_by_label'] = dict(entity_count)
     return stats
 
+def unique_entity_set(entities):
+    """
+    Returns a set of unique entities, defined by (label, normalized text) case-insensitive.
+    """
+    return set((e["label"], e["text"].strip().lower()) for e in entities)
+
+def unique_entity_analysis(gold_entities, found_entities):
+    gold_unique = unique_entity_set(gold_entities)
+    found_unique = unique_entity_set(found_entities)
+    missing_unique = gold_unique - found_unique
+    extra_unique = found_unique - gold_unique
+    return {
+        "gold_unique_count": len(gold_unique),
+        "found_unique_count": len(found_unique),
+        "matching_unique_count": len(gold_unique & found_unique),
+        "missing_unique_count": len(missing_unique),
+        "extra_unique_count": len(extra_unique),
+        "missing_unique_entities": sorted(list(missing_unique)),
+        "extra_unique_entities": sorted(list(extra_unique)),
+    }
+
 def validate_entities(datadir, base_out, max_tokens=384, sliding_window=False, stride=256):
     summary = []
     file_stats = []
@@ -505,6 +532,9 @@ def validate_entities(datadir, base_out, max_tokens=384, sliding_window=False, s
     found_label_counter = Counter()
     missing_label_counter = Counter()
     extra_label_counter = Counter()
+
+    all_gold_entities = []
+    all_found_entities = []
 
     skipped_files_path = os.path.join(base_out, "skipped_files.log.json")
     skipped_rows_path = os.path.join(base_out, "skipped_rows.log.json")
@@ -569,7 +599,13 @@ def validate_entities(datadir, base_out, max_tokens=384, sliding_window=False, s
                                 gold_entities.append(ent2)
                                 gold_seen.add(key)
 
-                    found_entities = merge_entities_from_windows(docsjson_dir, basename, num_chunks)
+                    found_entities = merge_entities_from_windows(
+                        docsjson_dir, basename, num_chunks, stride=stride, max_tokens=max_tokens
+                    )
+
+                    # Aggregate all entities for unique analysis
+                    all_gold_entities.extend(gold_entities)
+                    all_found_entities.extend(found_entities)
 
                     gold_set = set((e["label"], e["text"], e["start"], e["end"]) for e in gold_entities)
                     found_set = set((e["label"], e["text"], e["start"], e["end"]) for e in found_entities)
@@ -651,6 +687,9 @@ def validate_entities(datadir, base_out, max_tokens=384, sliding_window=False, s
 
     output_stats = count_files_and_entities(base_out)
 
+    # Unique entity analysis
+    unique_analysis = unique_entity_analysis(all_gold_entities, all_found_entities)
+
     print("\nValidation Summary (Document-Level, Sliding Window)")
     print("="*40)
     print(f"Total files processed:           {total_files}")
@@ -676,11 +715,20 @@ def validate_entities(datadir, base_out, max_tokens=384, sliding_window=False, s
     print("=== Output breakdown by file type ===")
     for k, v in output_stats.items():
         print(f"{k:10s} : {v}")
+
+    print("\n=== Unique Entities (by label/text, case-insensitive) ===")
+    print(f"Unique entities in original dataset: {unique_analysis['gold_unique_count']}")
+    print(f"Unique entities in your output:      {unique_analysis['found_unique_count']}")
+    print(f"Matching unique entities:            {unique_analysis['matching_unique_count']}")
+    print(f"Missing unique entities:             {unique_analysis['missing_unique_count']}")
+    print(f"Extra unique entities:               {unique_analysis['extra_unique_count']}")
+
     if summary:
         print(f"\n{len(summary)} file(s) had missing or extra entities. See validation_results.json for details.")
     if files_with_errors:
         print(f"\n{files_with_errors} file(s) had errors. See validation_results.json for details.")
 
+    # Write all details to JSON files (not printed in terminal)
     with open(os.path.join(base_out, "validation_results.json"), "w", encoding="utf-8") as vf:
         json.dump(summary, vf, ensure_ascii=False, indent=2)
     with open(os.path.join(base_out, "validation_stats.json"), "w", encoding="utf-8") as vf:
@@ -692,7 +740,8 @@ def validate_entities(datadir, base_out, max_tokens=384, sliding_window=False, s
             "missing": dict(missing_label_counter),
             "extra": dict(extra_label_counter),
             "detailed_comparison": detailed_comparison,
-            "output_stats": output_stats
+            "output_stats": output_stats,
+            "unique_entity_analysis": unique_analysis
         }, vf, ensure_ascii=False, indent=2)
     print(f"\nSee validation_results.json, validation_stats.json, and validation_comparison_by_label.json in {base_out}")
 
